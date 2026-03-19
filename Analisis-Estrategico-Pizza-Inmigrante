@@ -1,0 +1,1324 @@
+# ============================================================
+#  PIZZA INMIGRANTE — Análisis Estratégico Integral
+#  Genera: análisis en consola + PNG + PPTX + Excel
+#
+#  Dependencias (ejecutar una vez en terminal):
+#    pip install pandas openpyxl mlxtend matplotlib python-pptx
+#
+#  Uso: F5 en VS Code
+#
+#  Salidas en Output/:
+#    pizza_analisis_dashboard.png
+#    pizza_presentacion.pptx
+#    pizza_analisis_completo.xlsx
+# ============================================================
+
+import os
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+from collections import defaultdict, Counter
+from datetime import datetime
+from mlxtend.frequent_patterns import apriori, association_rules
+from mlxtend.preprocessing import TransactionEncoder
+import warnings
+warnings.filterwarnings('ignore')
+
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.dml.color import RGBColor
+from pptx.enum.text import PP_ALIGN
+
+import openpyxl
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+
+# ── Rutas ────────────────────────────────────────────────────
+ARCHIVO  = r"D:\USUARIO\Desktop\Visual Studio\Inmigrante\Analisis Ejecutivo Pizza Inmigrante\Archivo Consolidado.xlsx"
+OUT_DIR  = r"D:\USUARIO\Desktop\Visual Studio\Inmigrante\Analisis Ejecutivo Pizza Inmigrante\Output"
+OUT_PNG  = os.path.join(OUT_DIR, "pizza_analisis_dashboard.png")
+OUT_PPTX = os.path.join(OUT_DIR, "pizza_presentacion.pptx")
+OUT_XLSX = os.path.join(OUT_DIR, "pizza_analisis_completo.xlsx")
+
+os.makedirs(OUT_DIR, exist_ok=True)
+
+# ── Paleta ───────────────────────────────────────────────────
+plt.rcParams['figure.facecolor'] = '#1A1A2E'
+plt.rcParams['axes.facecolor']   = '#232342'
+plt.rcParams['axes.edgecolor']   = '#444466'
+plt.rcParams['axes.labelcolor']  = '#F0F0F0'
+plt.rcParams['xtick.color']      = '#9A9AB0'
+plt.rcParams['ytick.color']      = '#9A9AB0'
+plt.rcParams['text.color']       = '#F0F0F0'
+plt.rcParams['grid.color']       = '#2A2A4A'
+plt.rcParams['grid.linestyle']   = '--'
+plt.rcParams['grid.alpha']       = 0.5
+
+ACCENT = '#E94560'
+GOLD   = '#F5A623'
+TEAL   = '#0F9B8E'
+GREEN  = '#2ECC71'
+PURPLE = '#7F77DD'
+MUTED  = '#9A9AB0'
+DARK   = '#1A1A2E'
+CARD   = '#232342'
+LIGHT  = '#F0F0F0'
+
+def rgb(h):
+    h = h.lstrip('#')
+    return RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+def hex_fill(h):
+    h = h.lstrip('#')
+    return PatternFill("solid", fgColor=h)
+
+
+# ============================================================
+#  1. CARGA Y LIMPIEZA
+# ============================================================
+print("\n" + "="*60)
+print("  PIZZA INMIGRANTE — Análisis Estratégico")
+print("="*60)
+print("\n📂 Cargando datos...")
+
+df_dias  = pd.read_excel(ARCHIVO, sheet_name='Pedidos por día, mes y año')
+df_prods = pd.read_excel(ARCHIVO, sheet_name='Pedidos por producto')
+df_hist  = pd.read_excel(ARCHIVO, sheet_name='Historial de pedidos')
+df_det   = pd.read_excel(ARCHIVO, sheet_name='Det product vendidos por pedido')
+
+df_dias  = df_dias.dropna(subset=['Fecha'])
+df_dias['Fecha']     = pd.to_datetime(df_dias['Fecha'], dayfirst=True)
+df_dias['Mes']       = df_dias['Fecha'].dt.to_period('M')
+df_dias['DiaSemana'] = df_dias['Fecha'].dt.dayofweek
+
+df_hist = df_hist.dropna(subset=['Número'])
+df_hist['Fecha'] = pd.to_datetime(df_hist['Fecha'], dayfirst=True, errors='coerce')
+df_hist['Hora']  = df_hist['Fecha'].dt.hour
+
+df_det = df_det.dropna(subset=['Fecha'])
+df_det['Fecha'] = pd.to_datetime(df_det['Fecha'], dayfirst=True, errors='coerce')
+
+EXCLUIR_RUBROS = ['cliente']
+EXCLUIR_PRODS  = ['RETIRA', 'ENVIO', 'PEDIDOS YA', 'CUBIERTOO']
+df_det_c = df_det[
+    ~df_det['Rubro'].isin(EXCLUIR_RUBROS) &
+    ~df_det['Descripción'].isin(EXCLUIR_PRODS)
+].copy()
+
+print(f"   Pedidos cargados  : {df_hist.shape[0]:,}")
+print(f"   Líneas de detalle : {df_det_c.shape[0]:,}")
+print(f"   Período           : {df_dias['Fecha'].min().date()} → {df_dias['Fecha'].max().date()}")
+
+
+# ============================================================
+#  2. KPIs
+# ============================================================
+print("\n📊 Calculando KPIs...")
+
+total_ventas  = df_dias['Total'].sum()
+total_pedidos = df_dias['Cant. de pedidos'].sum()
+ticket_prom   = total_ventas / total_pedidos
+dias_op       = len(df_dias)
+
+efectivo  = df_hist['Efectivo'].sum()
+credito   = df_hist['T. de crédito'].sum()
+debito    = df_hist['T. de débito'].sum()
+vales     = df_hist['Vales'].sum()
+total_cob = df_hist['Total'].sum()
+sin_reg   = total_cob - efectivo - credito - debito - vales
+descuentos = df_hist['Descuento'].sum()
+ped_desc   = (df_hist['Descuento'] > 0).sum()
+
+print(f"   Facturación   : ${total_ventas:,.0f}")
+print(f"   Pedidos       : {total_pedidos:.0f}")
+print(f"   Ticket prom.  : ${ticket_prom:,.0f}")
+print(f"   Sin registrar : ${sin_reg:,.0f} ({sin_reg/total_cob*100:.1f}%)")
+
+
+# ============================================================
+#  3. ANÁLISIS TEMPORAL
+# ============================================================
+mes_ventas  = df_dias.groupby('Mes')['Total'].sum()
+mes_pedidos = df_dias.groupby('Mes')['Cant. de pedidos'].sum()
+mes_ticket  = mes_ventas / mes_pedidos
+
+nombres_dia = {0:'Lun', 1:'Mar', 2:'Mié', 3:'Jue', 4:'Vie', 5:'Sáb', 6:'Dom'}
+dia_stats = df_dias.groupby('DiaSemana').agg(
+    ventas_total=('Total', 'sum'),
+    pedidos_total=('Cant. de pedidos', 'sum'),
+    dias_count=('Total', 'count')
+).reset_index()
+dia_stats['pedidos_dia'] = dia_stats['pedidos_total'] / dia_stats['dias_count']
+dia_stats['ventas_dia']  = dia_stats['ventas_total']  / dia_stats['dias_count']
+dia_stats['nombre']      = dia_stats['DiaSemana'].map(nombres_dia)
+
+hora_stats = df_hist.groupby('Hora').agg(
+    pedidos=('Número', 'count'),
+    ventas=('Total', 'sum')
+).reset_index()
+
+
+# ============================================================
+#  4. PRODUCTOS
+# ============================================================
+prod_stats  = df_prods[df_prods['Cantidad'] > 0].sort_values('Total', ascending=False)
+baja_rot    = prod_stats[prod_stats['Cantidad'] < 20]
+rubro_stats = df_det_c.groupby('Rubro')['Total'].sum().sort_values(ascending=False)
+total_rubro = rubro_stats.sum()
+
+
+# ============================================================
+#  5. ANÁLISIS RELACIONAL
+# ============================================================
+print("\n🔗 Corriendo análisis relacional...")
+
+baskets_raw = defaultdict(list)
+for _, row in df_det_c.iterrows():
+    baskets_raw[row['Numbero']].append({
+        'prod' : row['Descripción'],
+        'rubro': row['Rubro'],
+        'total': row['Total'] or 0,
+        'fecha': row['Fecha'],
+        'dow'  : row['Fecha'].dayofweek if pd.notna(row['Fecha']) else None,
+    })
+baskets = {k: v for k, v in baskets_raw.items() if len(v) >= 2}
+print(f"   Pedidos con 2+ productos: {len(baskets)}")
+
+
+def correr_reglas(transacciones, etiqueta,
+                  min_support=0.015, min_confidence=0.20, min_lift=1.2):
+    """
+    Aplica el algoritmo Apriori sobre una lista de transacciones.
+
+    Parámetros:
+        transacciones  : list[list[str]] — cada lista es un pedido
+        etiqueta       : str — nombre del segmento (para log)
+        min_support    : float — % mínimo de pedidos con la combinación
+        min_confidence : float — P(B|A) mínima
+        min_lift       : float — lift mínimo (>1 = no es azar)
+
+    Retorna:
+        DataFrame con columnas: antecedente, consecuente,
+        support, confidence, lift
+    """
+    te      = TransactionEncoder()
+    te_arr  = te.fit(transacciones).transform(transacciones)
+    df_bool = pd.DataFrame(te_arr, columns=te.columns_)
+    freq    = apriori(df_bool, min_support=min_support, use_colnames=True)
+    if freq.empty:
+        return pd.DataFrame()
+    reglas = association_rules(freq, metric="lift", min_threshold=min_lift)
+    reglas = reglas[reglas['confidence'] >= min_confidence].copy()
+    reglas['antecedente'] = reglas['antecedents'].apply(lambda x: ', '.join(sorted(x)))
+    reglas['consecuente'] = reglas['consequents'].apply(lambda x: ', '.join(sorted(x)))
+    reglas = reglas.sort_values('lift', ascending=False).reset_index(drop=True)
+    print(f"   [{etiqueta}] → {len(reglas)} reglas")
+    return reglas
+
+
+trans_global = [list(set(i['prod'] for i in v)) for v in baskets.values()]
+
+trans_fds = [
+    list(set(i['prod'] for i in v))
+    for v in baskets.values()
+    if any(i['dow'] in [4, 5, 6] for i in v if i['dow'] is not None)
+]
+trans_semana = [
+    list(set(i['prod'] for i in v))
+    for v in baskets.values()
+    if any(i['dow'] in [0, 1, 2, 3] for i in v if i['dow'] is not None)
+]
+trans_alto = [
+    list(set(i['prod'] for i in v))
+    for v in baskets.values()
+    if sum(i['total'] for i in v) >= 40000
+]
+
+reglas_global = correr_reglas(trans_global,  "GLOBAL",        0.015, 0.20, 1.2)
+reglas_fds    = correr_reglas(trans_fds,     "FIN DE SEMANA", 0.015, 0.20, 1.2)
+reglas_semana = correr_reglas(trans_semana,  "ENTRE SEMANA",  0.015, 0.20, 1.2)
+reglas_alto   = correr_reglas(trans_alto,    "TICKET ALTO",   0.020, 0.20, 1.5)
+
+te3     = TransactionEncoder()
+te_arr3 = te3.fit(trans_global).transform(trans_global)
+df3     = pd.DataFrame(te_arr3, columns=te3.columns_)
+freq3   = apriori(df3, min_support=0.015, use_colnames=True, max_len=3)
+triplets = freq3[freq3['itemsets'].apply(len) == 3].sort_values('support', ascending=False).reset_index(drop=True)
+triplets['items']   = triplets['itemsets'].apply(lambda x: ', '.join(sorted(x)))
+triplets['pedidos'] = (triplets['support'] * len(baskets)).astype(int)
+
+freq_prods = Counter(p for v in baskets.values() for p in set(i['prod'] for i in v))
+top15 = [p for p, _ in freq_prods.most_common(15)]
+coapar = set()
+for v in baskets.values():
+    ps = set(i['prod'] for i in v)
+    for p1 in top15:
+        for p2 in top15:
+            if p1 < p2 and p1 in ps and p2 in ps:
+                coapar.add((p1, p2))
+nunca = [
+    (p1, p2) for p1 in top15 for p2 in top15
+    if p1 < p2 and (p1, p2) not in coapar
+]
+
+combos = [
+    {"nombre": "Combo Libre Clásico",   "items": "Pizza Libre + Pepsi 1,5L",             "conf": 0.53, "lift": 2.65},
+    {"nombre": "Combo Porteño de Mesa", "items": "Porc. Muzza + Porc. Fugazzetta",        "conf": 0.42, "lift": 3.60},
+    {"nombre": "Combo Premium Noche",   "items": "Pizza Libre + Gin Tonic",               "conf": 0.47, "lift": 2.34},
+    {"nombre": "Italiana Dúo",          "items": "Margherita + Tomate e Rúcula",          "conf": 0.50, "lift": 2.39},
+    {"nombre": "Trío Italiano Premium", "items": "Margherita + Napoli + Tomate e Rúcula", "conf": 0.73, "lift": 9.33},
+]
+
+
+# ============================================================
+#  6. PRECIOS vs PIZZA40
+# ============================================================
+italiana_chica = [
+    ("Margherita",        9500,  12400),
+    ("Napoli",           11000,  11600),
+    ("Jamón",            11000,  12400),
+    ("Calabrese",        11000,  15600),
+    ("Rúcula e tomate",  12000,  12800),
+    ("Jamón y morrones", 12500,  15600),
+    ("Provolone",        11000,  13300),
+    ("Queso azul",       11000,  13300),
+    ("Quattro formaggi", 13000,  14900),
+]
+portena_precios = [
+    ("Mozzarella",         22000, 20900),
+    ("Jamón",              28000, 27400),
+    ("Napolitana",         28000, 26700),
+    ("Calabresa",          28000, 29900),
+    ("Fugazzetta Rellena", 32000,  None),
+    ("Jamón y Morrones",   32000,  None),
+    ("Provolone",          30000, 28200),
+    ("Queso Azul",         30000,  None),
+]
+
+VIAJES_MES = 236
+MARGEN     = 0.35
+escenarios_delivery = [
+    ("Mínimo",          350000),
+    ("Mercado medio",   500000),
+    ("Competitivo",     650000),
+    ("Premium",         800000),
+]
+
+
+# ============================================================
+#  7. DASHBOARD PNG
+# ============================================================
+print("\n🎨 Generando dashboard PNG...")
+
+fig = plt.figure(figsize=(22, 26))
+fig.suptitle(
+    'Pizza Inmigrante — Análisis Estratégico Integral\nAgo 2025 – Feb 2026',
+    fontsize=20, fontweight='bold', color='white', y=0.99
+)
+
+# 7.1 Ventas por mes
+ax1 = fig.add_subplot(4, 3, 1)
+meses_str = [str(m) for m in mes_ventas.index]
+col_mes   = ['#E94560' if '2026-01' in s else '#F5A623' if '2025-08' in s else '#0F9B8E' for s in meses_str]
+bars = ax1.bar(meses_str, mes_ventas.values / 1e6, color=col_mes, width=0.6)
+ax1.set_title('Ventas por mes ($M)', fontsize=11, fontweight='bold', pad=8)
+ax1.yaxis.set_major_formatter(mticker.FormatStrFormatter('$%.1fM'))
+ax1.tick_params(axis='x', rotation=45)
+for b, v in zip(bars, mes_ventas.values):
+    ax1.text(b.get_x() + b.get_width()/2, b.get_height() + 0.05,
+             f'${v/1e6:.1f}M', ha='center', fontsize=8, color='white')
+
+# 7.2 Días semana
+ax2 = fig.add_subplot(4, 3, 2)
+ds = dia_stats.sort_values('DiaSemana')
+col_dia = ['#F5A623' if n == 'Dom' else '#E94560' if n in ['Sáb', 'Vie'] else '#0F9B8E' if n == 'Jue' else '#9A9AB0'
+           for n in ds['nombre']]
+ax2.bar(ds['nombre'], ds['pedidos_dia'], color=col_dia, width=0.6)
+ax2.set_title('Pedidos prom. por día', fontsize=11, fontweight='bold', pad=8)
+ax2.set_ylabel('Pedidos/día')
+
+# 7.3 Horarios
+ax3 = fig.add_subplot(4, 3, 3)
+hs = hora_stats.sort_values('Hora')
+col_h = ['#F5A623' if h == 23 else '#E94560' if h in [22, 0] else '#0F9B8E' if h == 21 else '#9A9AB0'
+         for h in hs['Hora']]
+ax3.bar([f"{int(h):02d}hs" for h in hs['Hora']], hs['pedidos'], color=col_h, width=0.6)
+ax3.set_title('Pedidos por hora', fontsize=11, fontweight='bold', pad=8)
+ax3.tick_params(axis='x', rotation=45)
+
+# 7.4 Top productos
+ax4 = fig.add_subplot(4, 3, (4, 5))
+top10   = prod_stats.head(10)
+col_p   = ['#F5A623'] + ['#E94560'] * 4 + ['#0F9B8E'] * 5
+bars4   = ax4.barh(top10['Producto'][::-1], top10['Total'][::-1] / 1e6, color=col_p[::-1])
+ax4.set_title('Top 10 productos ($M)', fontsize=11, fontweight='bold', pad=8)
+ax4.xaxis.set_major_formatter(mticker.FormatStrFormatter('$%.1fM'))
+for b, v in zip(bars4, top10['Total'][::-1]):
+    ax4.text(b.get_width() + 0.02, b.get_y() + b.get_height()/2,
+             f'${v/1e6:.1f}M', va='center', fontsize=8, color='white')
+
+# 7.5 Rubros donut
+ax5 = fig.add_subplot(4, 3, 6)
+rt   = rubro_stats.head(6)
+otros = rubro_stats[6:].sum()
+rp   = pd.concat([rt, pd.Series({'Otros': otros})]) if otros > 0 else rt
+col_r = ['#E94560', '#0F9B8E', '#9A9AB0', '#7F77DD', '#F5A623', '#5DCAA5', '#888780']
+wedges, texts, autos = ax5.pie(
+    rp.values, labels=rp.index, autopct='%1.0f%%',
+    colors=col_r[:len(rp)], pctdistance=0.75, startangle=90,
+    wedgeprops=dict(width=0.5)
+)
+for t in texts:
+    t.set_fontsize(8)
+for a in autos:
+    a.set_fontsize(7)
+ax5.set_title('Ventas por rubro', fontsize=11, fontweight='bold', pad=8)
+
+# 7.6 Lift reglas globales
+ax6 = fig.add_subplot(4, 3, 7)
+if not reglas_global.empty:
+    tr   = reglas_global.head(10)
+    etq  = [f"{r['antecedente'][:18]}→{r['consecuente'][:14]}" for _, r in tr.iterrows()]
+    lft  = tr['lift'].values
+    col_l = ['#2ECC71' if l >= 4 else '#0F9B8E' if l >= 2.5 else '#F5A623' for l in lft]
+    bars6 = ax6.barh(range(len(etq)), lft[::-1], color=col_l[::-1])
+    ax6.set_yticks(range(len(etq)))
+    ax6.set_yticklabels(etq[::-1], fontsize=7)
+    ax6.axvline(x=1, color='#E94560', linestyle='--', alpha=0.7, label='Azar (lift=1)')
+    ax6.set_title('Top reglas por Lift', fontsize=11, fontweight='bold', pad=8)
+    ax6.legend(fontsize=8)
+    for b, l in zip(bars6, lft[::-1]):
+        ax6.text(b.get_width() + 0.05, b.get_y() + b.get_height()/2,
+                 f'{l:.2f}x', va='center', fontsize=8, color='white')
+
+# 7.7 Confianza
+ax7 = fig.add_subplot(4, 3, 8)
+if not reglas_global.empty:
+    tc   = reglas_global.sort_values('confidence', ascending=False).head(10)
+    etq7 = [f"{r['antecedente'][:16]}→{r['consecuente'][:12]}" for _, r in tc.iterrows()]
+    conf = tc['confidence'].values
+    col_c = ['#2ECC71' if c >= 0.5 else '#0F9B8E' if c >= 0.35 else '#F5A623' for c in conf]
+    ax7.barh(range(len(etq7)), conf[::-1], color=col_c[::-1])
+    ax7.set_yticks(range(len(etq7)))
+    ax7.set_yticklabels(etq7[::-1], fontsize=7)
+    ax7.xaxis.set_major_formatter(mticker.PercentFormatter(1.0))
+    ax7.set_title('Top reglas por Confianza', fontsize=11, fontweight='bold', pad=8)
+
+# 7.8 Lift promedio por segmento
+ax8 = fig.add_subplot(4, 3, 9)
+segs = {
+    'Global':       reglas_global,
+    'Fin semana':   reglas_fds,
+    'Entre semana': reglas_semana,
+    'Ticket alto':  reglas_alto,
+}
+promedios = {k: v['lift'].mean() if not v.empty else 0 for k, v in segs.items()}
+col_s = ['#E94560', '#F5A623', '#0F9B8E', '#7F77DD']
+bars8 = ax8.bar(promedios.keys(), promedios.values(), color=col_s, width=0.5)
+ax8.axhline(y=1, color='#9A9AB0', linestyle='--', alpha=0.5)
+ax8.set_title('Lift promedio por segmento', fontsize=11, fontweight='bold', pad=8)
+ax8.tick_params(axis='x', rotation=15)
+for b, v in zip(bars8, promedios.values()):
+    ax8.text(b.get_x() + b.get_width()/2, b.get_height() + 0.05,
+             f'{v:.2f}x', ha='center', fontsize=9, color='white')
+
+# 7.9 Precios italiana chica
+ax9 = fig.add_subplot(4, 3, 10)
+nic = [p for p in italiana_chica if p[2]]
+x   = np.arange(len(nic))
+w   = 0.26
+ax9.bar(x - w, [p[1]          for p in nic], w, label='Actual',  color='#9A9AB0', alpha=0.8)
+ax9.bar(x,     [round(p[1]*1.15) for p in nic], w, label='+15%', color='#0F9B8E', alpha=0.9)
+ax9.bar(x + w, [p[2]          for p in nic], w, label='Pizza40', color='#E94560', alpha=0.8)
+ax9.set_title('Italiana chica vs Pizza40', fontsize=11, fontweight='bold', pad=8)
+ax9.set_xticks(x)
+ax9.set_xticklabels([p[0][:7] for p in nic], rotation=45, fontsize=7)
+ax9.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f'${v/1000:.0f}k'))
+ax9.legend(fontsize=8)
+
+# 7.10 Distribución ticket
+ax10 = fig.add_subplot(4, 3, 11)
+rangos = ['<$15k', '$15k-$25k', '$25k-$40k', '$40k-$60k', '>$60k']
+cnts   = [776, 562, 573, 181, 131]
+col_t  = ['#9A9AB0', '#0F9B8E', '#E94560', '#7F77DD', '#F5A623']
+bars10 = ax10.bar(rangos, cnts, color=col_t, width=0.6)
+ax10.set_title('Distribución del ticket', fontsize=11, fontweight='bold', pad=8)
+ax10.tick_params(axis='x', rotation=20)
+for b, c in zip(bars10, cnts):
+    ax10.text(b.get_x() + b.get_width()/2, b.get_height() + 3,
+              f'{c/sum(cnts)*100:.1f}%', ha='center', fontsize=8, color='white')
+
+# 7.11 Medios de pago
+ax11 = fig.add_subplot(4, 3, 12)
+medios = ['Efectivo', 'Sin reg.', 'Débito', 'Vales', 'Crédito']
+vals   = [efectivo, sin_reg, debito, vales, credito]
+col_mp = ['#0F9B8E', '#E94560', '#2ECC71', '#F5A623', '#7F77DD']
+bars11 = ax11.bar(medios, [v / 1e6 for v in vals], color=col_mp, width=0.6)
+ax11.set_title('Medios de pago ($M)', fontsize=11, fontweight='bold', pad=8)
+ax11.yaxis.set_major_formatter(mticker.FormatStrFormatter('$%.1fM'))
+for b, v in zip(bars11, vals):
+    ax11.text(b.get_x() + b.get_width()/2, b.get_height() + 0.1,
+              f'${v/1e6:.1f}M', ha='center', fontsize=8, color='white')
+
+plt.tight_layout(rect=[0, 0, 1, 0.97])
+plt.savefig(OUT_PNG, dpi=150, bbox_inches='tight', facecolor='#1A1A2E')
+plt.close()
+print(f"   Guardado: {OUT_PNG}")
+
+
+# ============================================================
+#  8. EXCEL
+# ============================================================
+print("\n📊 Generando Excel...")
+
+wb = openpyxl.Workbook()
+
+def estilo_header(ws, fila, cols, fg='E94560', texto='FFFFFF'):
+    for col in range(1, cols + 1):
+        c = ws.cell(row=fila, column=col)
+        c.fill      = PatternFill("solid", fgColor=fg)
+        c.font      = Font(bold=True, color=texto, size=11)
+        c.alignment = Alignment(horizontal='center', vertical='center')
+
+def estilo_fila(ws, fila, cols, fg='232342'):
+    for col in range(1, cols + 1):
+        c = ws.cell(row=fila, column=col)
+        c.fill      = PatternFill("solid", fgColor=fg)
+        c.font      = Font(color='F0F0F0', size=10)
+        c.alignment = Alignment(horizontal='center', vertical='center')
+
+def borde_tabla(ws, f_ini, f_fin, c_ini, c_fin):
+    thin = Side(style='thin', color='444466')
+    for row in ws.iter_rows(min_row=f_ini, max_row=f_fin, min_col=c_ini, max_col=c_fin):
+        for cell in row:
+            cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+def titulo_seccion(ws, fila, texto, cols=6):
+    ws.merge_cells(start_row=fila, start_column=1, end_row=fila, end_column=cols)
+    c = ws.cell(row=fila, column=1, value=texto)
+    c.fill      = PatternFill("solid", fgColor='1A1A2E')
+    c.font      = Font(bold=True, color='F5A623', size=13)
+    c.alignment = Alignment(horizontal='left', vertical='center')
+    ws.row_dimensions[fila].height = 28
+
+
+# ── Pestaña 1: Resumen Ejecutivo ─────────────────────────────
+ws1 = wb.active
+ws1.title = '1. Resumen Ejecutivo'
+ws1.sheet_view.showGridLines = False
+ws1.column_dimensions['A'].width = 32
+ws1.column_dimensions['B'].width = 22
+ws1.column_dimensions['C'].width = 22
+
+titulo_seccion(ws1, 1, '  PIZZA INMIGRANTE — Resumen Ejecutivo', 3)
+ws1.row_dimensions[1].height = 36
+
+kpis = [
+    ('KPI',                    'Valor',                           'Detalle'),
+    ('Facturación total',      f"${total_ventas:,.0f}",           'Ago 2025 - Feb 2026'),
+    ('Pedidos totales',        f"{total_pedidos:.0f}",            '7 meses'),
+    ('Ticket promedio',        f"${ticket_prom:,.0f}",            'Por pedido'),
+    ('Días operativos',        f"{dias_op}",                      'Con al menos 1 pedido'),
+    ('Pedidos / día prom.',    f"{total_pedidos/dias_op:.1f}",    'Días operativos'),
+    ('Pizza Libre (estrella)', f"${prod_stats.iloc[0]['Total']:,.0f}", f"{prod_stats.iloc[0]['Total']/total_ventas*100:.1f}% del total"),
+    ('Descuentos otorgados',   f"${descuentos:,.0f}",             f"{ped_desc} pedidos ({ped_desc/len(df_hist)*100:.1f}%)"),
+    ('Efectivo',               f"${efectivo:,.0f}",               f"{efectivo/total_cob*100:.1f}%"),
+    ('Débito',                 f"${debito:,.0f}",                 f"{debito/total_cob*100:.1f}%"),
+    ('Crédito',                f"${credito:,.0f}",                f"{credito/total_cob*100:.1f}%"),
+    ('Vales',                  f"${vales:,.0f}",                  f"{vales/total_cob*100:.1f}%"),
+    ('Sin medio registrado',   f"${sin_reg:,.0f}",                f"{sin_reg/total_cob*100:.1f}% REVISAR"),
+]
+
+estilo_header(ws1, 3, 3, fg='E94560')
+for i, (k, v, d) in enumerate(kpis):
+    r = i + 3
+    ws1.cell(row=r, column=1, value=k)
+    ws1.cell(row=r, column=2, value=v)
+    ws1.cell(row=r, column=3, value=d)
+    if i > 0:
+        alt = '2A2A4A' if i % 2 == 0 else '1E1E3E'
+        estilo_fila(ws1, r, 3, fg=alt)
+    ws1.row_dimensions[r].height = 22
+
+titulo_seccion(ws1, 18, '  ALERTAS', 3)
+alertas = [
+    ('CRITICO',     '$24,8M sin medio de pago registrado — auditar esta semana'),
+    ('CRITICO',     'Ticket cayó $7.000 de noviembre a febrero'),
+    ('IMPORTANTE',  'Enero 2026 cayó 79% en volumen vs agosto'),
+    ('IMPORTANTE',  f'{len(baja_rot)} productos con menos de 20 ventas en 7 meses'),
+    ('OPORTUNIDAD', 'Lunes y martes: solo 4-7 pedidos/dia vs 25 los domingos'),
+    ('OPORTUNIDAD', 'Italiana chica: margen para +15% y seguir debajo de Pizza40'),
+]
+for i, (tipo, msg) in enumerate(alertas):
+    r = 19 + i
+    ws1.cell(row=r, column=1, value=tipo)
+    ws1.merge_cells(start_row=r, start_column=2, end_row=r, end_column=3)
+    ws1.cell(row=r, column=2, value=msg)
+    alt = '2A2A4A' if i % 2 == 0 else '1E1E3E'
+    estilo_fila(ws1, r, 3, fg=alt)
+    ws1.cell(row=r, column=2).alignment = Alignment(horizontal='left')
+    ws1.row_dimensions[r].height = 20
+
+borde_tabla(ws1, 3, 15, 1, 3)
+borde_tabla(ws1, 19, 24, 1, 3)
+
+
+# ── Pestaña 2: Ventas Temporales ─────────────────────────────
+ws2 = wb.create_sheet('2. Ventas Temporales')
+ws2.sheet_view.showGridLines = False
+
+titulo_seccion(ws2, 1, '  VENTAS POR MES', 5)
+estilo_header(ws2, 2, 5, fg='0F9B8E')
+for j, h in enumerate(['Mes', 'Ventas ($)', 'Pedidos', 'Ticket Promedio', 'Var. ticket vs mes ant.'], 1):
+    ws2.cell(row=2, column=j, value=h)
+
+ticket_ant = None
+for i, m in enumerate(mes_ventas.index):
+    r  = i + 3
+    tk = mes_ticket[m]
+    var = ((tk - ticket_ant) / ticket_ant * 100) if ticket_ant else 0
+    ws2.cell(row=r, column=1, value=str(m))
+    ws2.cell(row=r, column=2, value=round(mes_ventas[m]))
+    ws2.cell(row=r, column=3, value=int(mes_pedidos[m]))
+    ws2.cell(row=r, column=4, value=round(tk))
+    ws2.cell(row=r, column=5, value=f"{var:+.1f}%" if ticket_ant else "—")
+    alt = '2A2A4A' if i % 2 == 0 else '1E1E3E'
+    estilo_fila(ws2, r, 5, fg=alt)
+    col_var = '2ECC71' if var >= 0 else 'E94560'
+    ws2.cell(row=r, column=5).font = Font(color=col_var, size=10)
+    ticket_ant = tk
+    ws2.row_dimensions[r].height = 20
+
+titulo_seccion(ws2, 12, '  PEDIDOS POR DIA DE SEMANA', 5)
+estilo_header(ws2, 13, 4, fg='0F9B8E')
+for j, h in enumerate(['Día', 'Pedidos prom./día', 'Ventas prom./día', 'Días registrados'], 1):
+    ws2.cell(row=13, column=j, value=h)
+for i, (_, r) in enumerate(dia_stats.sort_values('DiaSemana').iterrows()):
+    ro = 14 + i
+    ws2.cell(row=ro, column=1, value=r['nombre'])
+    ws2.cell(row=ro, column=2, value=round(r['pedidos_dia'], 1))
+    ws2.cell(row=ro, column=3, value=round(r['ventas_dia']))
+    ws2.cell(row=ro, column=4, value=int(r['dias_count']))
+    alt = '2A2A4A' if i % 2 == 0 else '1E1E3E'
+    estilo_fila(ws2, ro, 4, fg=alt)
+    ws2.row_dimensions[ro].height = 20
+
+titulo_seccion(ws2, 23, '  PEDIDOS POR HORA', 5)
+estilo_header(ws2, 24, 3, fg='0F9B8E')
+for j, h in enumerate(['Hora', 'Pedidos totales', 'Ventas totales ($)'], 1):
+    ws2.cell(row=24, column=j, value=h)
+for i, (_, r) in enumerate(hora_stats.sort_values('pedidos', ascending=False).iterrows()):
+    ro = 25 + i
+    ws2.cell(row=ro, column=1, value=f"{int(r['Hora']):02d}hs")
+    ws2.cell(row=ro, column=2, value=int(r['pedidos']))
+    ws2.cell(row=ro, column=3, value=round(r['ventas']))
+    alt = '2A2A4A' if i % 2 == 0 else '1E1E3E'
+    estilo_fila(ws2, ro, 3, fg=alt)
+    ws2.row_dimensions[ro].height = 20
+
+for col in ['A', 'B', 'C', 'D', 'E']:
+    ws2.column_dimensions[col].width = 22
+borde_tabla(ws2, 2, 9, 1, 5)
+borde_tabla(ws2, 13, 20, 1, 4)
+borde_tabla(ws2, 24, 24 + len(hora_stats), 1, 3)
+
+
+# ── Pestaña 3: Productos ─────────────────────────────────────
+ws3 = wb.create_sheet('3. Productos')
+ws3.sheet_view.showGridLines = False
+ws3.column_dimensions['A'].width = 38
+for col in ['B', 'C', 'D', 'E']:
+    ws3.column_dimensions[col].width = 18
+
+titulo_seccion(ws3, 1, '  TOP PRODUCTOS POR FACTURACIÓN', 5)
+estilo_header(ws3, 2, 5, fg='7F77DD')
+for j, h in enumerate(['Producto', 'Cantidad (uds)', 'Total ($)', 'Precio prom. ($)', '% del total'], 1):
+    ws3.cell(row=2, column=j, value=h)
+for i, (_, r) in enumerate(prod_stats.head(20).iterrows()):
+    ro  = 3 + i
+    pct = r['Total'] / prod_stats['Total'].sum() * 100
+    ws3.cell(row=ro, column=1, value=r['Producto'])
+    ws3.cell(row=ro, column=2, value=round(r['Cantidad']))
+    ws3.cell(row=ro, column=3, value=round(r['Total']))
+    ws3.cell(row=ro, column=4, value=round(r['Total'] / r['Cantidad']) if r['Cantidad'] else 0)
+    ws3.cell(row=ro, column=5, value=f"{pct:.1f}%")
+    alt = '2A2A4A' if i % 2 == 0 else '1E1E3E'
+    estilo_fila(ws3, ro, 5, fg=alt)
+    ws3.cell(row=ro, column=1).alignment = Alignment(horizontal='left')
+    ws3.row_dimensions[ro].height = 20
+
+titulo_seccion(ws3, 25, '  PRODUCTOS BAJA ROTACIÓN (menos de 20 ventas en 7 meses)', 5)
+estilo_header(ws3, 26, 3, fg='E94560')
+for j, h in enumerate(['Producto', 'Cantidad', 'Total ($)'], 1):
+    ws3.cell(row=26, column=j, value=h)
+for i, (_, r) in enumerate(baja_rot.head(20).iterrows()):
+    ro = 27 + i
+    ws3.cell(row=ro, column=1, value=r['Producto'])
+    ws3.cell(row=ro, column=2, value=round(r['Cantidad']))
+    ws3.cell(row=ro, column=3, value=round(r['Total']))
+    alt = '2A2A4A' if i % 2 == 0 else '1E1E3E'
+    estilo_fila(ws3, ro, 3, fg=alt)
+    ws3.cell(row=ro, column=1).alignment = Alignment(horizontal='left')
+    ws3.row_dimensions[ro].height = 20
+
+titulo_seccion(ws3, 49, '  VENTAS POR RUBRO', 5)
+estilo_header(ws3, 50, 3, fg='7F77DD')
+for j, h in enumerate(['Rubro', 'Total ($)', '% del total'], 1):
+    ws3.cell(row=50, column=j, value=h)
+for i, (rubro, val) in enumerate(rubro_stats.items()):
+    ro = 51 + i
+    ws3.cell(row=ro, column=1, value=rubro)
+    ws3.cell(row=ro, column=2, value=round(val))
+    ws3.cell(row=ro, column=3, value=f"{val/total_rubro*100:.1f}%")
+    alt = '2A2A4A' if i % 2 == 0 else '1E1E3E'
+    estilo_fila(ws3, ro, 3, fg=alt)
+    ws3.cell(row=ro, column=1).alignment = Alignment(horizontal='left')
+    ws3.row_dimensions[ro].height = 20
+
+borde_tabla(ws3, 2, 22, 1, 5)
+borde_tabla(ws3, 26, 46, 1, 3)
+borde_tabla(ws3, 50, 50 + len(rubro_stats), 1, 3)
+
+
+# ── Pestaña 4: Análisis Relacional ───────────────────────────
+ws4 = wb.create_sheet('4. Analisis Relacional')
+ws4.sheet_view.showGridLines = False
+ws4.column_dimensions['A'].width = 38
+ws4.column_dimensions['B'].width = 38
+for col in ['C', 'D', 'E', 'F']:
+    ws4.column_dimensions[col].width = 16
+
+
+def escribir_reglas(ws, reglas, fila_inicio, titulo, color_header):
+    titulo_seccion(ws, fila_inicio, f'  {titulo}', 6)
+    fh = fila_inicio + 1
+    estilo_header(ws, fh, 6, fg=color_header)
+    for j, h in enumerate(
+        ['SI pide...', 'ENTONCES pide...', 'Soporte', 'Confianza', 'Lift', 'Intensidad'], 1
+    ):
+        ws.cell(row=fh, column=j, value=h)
+    if reglas.empty:
+        ws.cell(row=fh + 1, column=1, value='Sin reglas con los umbrales actuales')
+        return fh + 2
+    for i, (_, r) in enumerate(reglas.head(15).iterrows()):
+        ro = fh + 1 + i
+        intensidad = 'MUY FUERTE (lift>5)' if r['lift'] >= 5 else 'FUERTE (lift>3)' if r['lift'] >= 3 else 'MODERADO'
+        ws.cell(row=ro, column=1, value=r['antecedente'])
+        ws.cell(row=ro, column=2, value=r['consecuente'])
+        ws.cell(row=ro, column=3, value=round(r['support'], 3))
+        ws.cell(row=ro, column=4, value=f"{r['confidence']*100:.0f}%")
+        ws.cell(row=ro, column=5, value=round(r['lift'], 2))
+        ws.cell(row=ro, column=6, value=intensidad)
+        alt = '2A2A4A' if i % 2 == 0 else '1E1E3E'
+        estilo_fila(ws, ro, 6, fg=alt)
+        ws.cell(row=ro, column=1).alignment = Alignment(horizontal='left')
+        ws.cell(row=ro, column=2).alignment = Alignment(horizontal='left')
+        col_lift = '2ECC71' if r['lift'] >= 4 else '0F9B8E' if r['lift'] >= 2.5 else 'F5A623'
+        ws.cell(row=ro, column=5).font = Font(color=col_lift, bold=True, size=10)
+        ws.row_dimensions[ro].height = 20
+    borde_tabla(ws, fh, fh + min(15, len(reglas)), 1, 6)
+    return fh + min(15, len(reglas)) + 2
+
+
+fila = 1
+fila = escribir_reglas(ws4, reglas_global, fila, 'REGLAS GLOBALES',              'E94560')
+fila = escribir_reglas(ws4, reglas_fds,    fila, 'FIN DE SEMANA (Vie/Sab/Dom)',  '0F9B8E')
+fila = escribir_reglas(ws4, reglas_semana, fila, 'ENTRE SEMANA (Lun-Jue)',       'F5A623')
+fila = escribir_reglas(ws4, reglas_alto,   fila, 'TICKET ALTO (mayor a $40.000)','7F77DD')
+
+titulo_seccion(ws4, fila, '  TRIPLETS — Combinaciones de 3 productos', 6)
+fila += 1
+estilo_header(ws4, fila, 3, fg='2ECC71', texto='1A1A2E')
+for j, h in enumerate(['Productos (trio)', 'Soporte', 'Pedidos estimados'], 1):
+    ws4.cell(row=fila, column=j, value=h)
+for i, (_, r) in enumerate(triplets.head(10).iterrows()):
+    ro = fila + 1 + i
+    ws4.cell(row=ro, column=1, value=r['items'])
+    ws4.cell(row=ro, column=2, value=round(r['support'], 3))
+    ws4.cell(row=ro, column=3, value=r['pedidos'])
+    alt = '2A2A4A' if i % 2 == 0 else '1E1E3E'
+    estilo_fila(ws4, ro, 3, fg=alt)
+    ws4.cell(row=ro, column=1).alignment = Alignment(horizontal='left')
+    ws4.row_dimensions[ro].height = 20
+borde_tabla(ws4, fila, fila + min(10, len(triplets)), 1, 3)
+fila += min(10, len(triplets)) + 2
+
+titulo_seccion(ws4, fila, '  NUNCA SE COMBINAN (entre top productos)', 6)
+fila += 1
+estilo_header(ws4, fila, 2, fg='E94560')
+ws4.cell(row=fila, column=1, value='Producto 1')
+ws4.cell(row=fila, column=2, value='Producto 2')
+for i, (p1, p2) in enumerate(nunca[:10]):
+    ro = fila + 1 + i
+    ws4.cell(row=ro, column=1, value=p1)
+    ws4.cell(row=ro, column=2, value=p2)
+    alt = '2A2A4A' if i % 2 == 0 else '1E1E3E'
+    estilo_fila(ws4, ro, 2, fg=alt)
+    ws4.cell(row=ro, column=1).alignment = Alignment(horizontal='left')
+    ws4.cell(row=ro, column=2).alignment = Alignment(horizontal='left')
+    ws4.row_dimensions[ro].height = 20
+borde_tabla(ws4, fila, fila + len(nunca[:10]), 1, 2)
+fila += len(nunca[:10]) + 2
+
+titulo_seccion(ws4, fila, '  COMBOS SUGERIDOS — basados en datos reales', 6)
+fila += 1
+estilo_header(ws4, fila, 4, fg='F5A623', texto='1A1A2E')
+for j, h in enumerate(['Nombre del combo', 'Productos', 'Confianza', 'Lift'], 1):
+    ws4.cell(row=fila, column=j, value=h)
+for i, c in enumerate(combos):
+    ro = fila + 1 + i
+    ws4.cell(row=ro, column=1, value=c['nombre'])
+    ws4.cell(row=ro, column=2, value=c['items'])
+    ws4.cell(row=ro, column=3, value=f"{c['conf']*100:.0f}%")
+    ws4.cell(row=ro, column=4, value=c['lift'])
+    alt = '2A2A4A' if i % 2 == 0 else '1E1E3E'
+    estilo_fila(ws4, ro, 4, fg=alt)
+    ws4.cell(row=ro, column=1).alignment = Alignment(horizontal='left')
+    ws4.cell(row=ro, column=2).alignment = Alignment(horizontal='left')
+    col_l = '2ECC71' if c['lift'] >= 5 else '0F9B8E' if c['lift'] >= 3 else 'F5A623'
+    ws4.cell(row=ro, column=4).font = Font(color=col_l, bold=True, size=10)
+    ws4.row_dimensions[ro].height = 20
+borde_tabla(ws4, fila, fila + len(combos), 1, 4)
+
+
+# ── Pestaña 5: Precios ───────────────────────────────────────
+ws5 = wb.create_sheet('5. Estrategia Precios')
+ws5.sheet_view.showGridLines = False
+ws5.column_dimensions['A'].width = 26
+for col in ['B', 'C', 'D', 'E', 'F']:
+    ws5.column_dimensions[col].width = 18
+
+titulo_seccion(ws5, 1, '  ITALIANA CHICA — Undercut vs Pizza40 (+15%)', 6)
+estilo_header(ws5, 2, 6, fg='0F9B8E')
+for j, h in enumerate(['Producto', 'Precio actual', '+15%', 'Pizza40 chica', 'Diferencia $', 'Estado'], 1):
+    ws5.cell(row=2, column=j, value=h)
+for i, (nombre, actual, comp) in enumerate(italiana_chica):
+    ro   = 3 + i
+    nuevo = round(actual * 1.15)
+    diff  = (comp - nuevo) if comp else None
+    if diff and diff > 0:
+        estado = f"{diff/comp*100:.1f}% mas barato"
+    elif diff:
+        estado = f"${abs(diff):,} mas caro"
+    else:
+        estado = "—"
+    ws5.cell(row=ro, column=1, value=nombre)
+    ws5.cell(row=ro, column=2, value=actual)
+    ws5.cell(row=ro, column=3, value=nuevo)
+    ws5.cell(row=ro, column=4, value=comp if comp else "—")
+    ws5.cell(row=ro, column=5, value=diff if diff else "—")
+    ws5.cell(row=ro, column=6, value=estado)
+    alt = '2A2A4A' if i % 2 == 0 else '1E1E3E'
+    estilo_fila(ws5, ro, 6, fg=alt)
+    ws5.cell(row=ro, column=1).alignment = Alignment(horizontal='left')
+    col_e = '2ECC71' if diff and diff > 0 else 'E94560'
+    ws5.cell(row=ro, column=6).font = Font(color=col_e, size=10)
+    ws5.row_dimensions[ro].height = 20
+
+titulo_seccion(ws5, 14, '  PORTEÑA ENTERA — Undercut vs Pizza40 (+10%)', 6)
+estilo_header(ws5, 15, 6, fg='E94560')
+for j, h in enumerate(['Producto', 'Precio actual', '+10%', 'Pizza40 (40cm)', 'Diferencia $', 'Estado'], 1):
+    ws5.cell(row=15, column=j, value=h)
+for i, (nombre, actual, comp) in enumerate(portena_precios):
+    ro    = 16 + i
+    nuevo = round(actual * 1.10)
+    diff  = (comp - nuevo) if comp else None
+    if diff and diff > 0:
+        estado = f"{diff/comp*100:.1f}% mas barato"
+    elif diff:
+        estado = f"${abs(diff):,} mas caro"
+    else:
+        estado = "Sin competidor directo"
+    ws5.cell(row=ro, column=1, value=nombre)
+    ws5.cell(row=ro, column=2, value=actual)
+    ws5.cell(row=ro, column=3, value=nuevo)
+    ws5.cell(row=ro, column=4, value=comp if comp else "—")
+    ws5.cell(row=ro, column=5, value=diff if diff else "—")
+    ws5.cell(row=ro, column=6, value=estado)
+    alt = '2A2A4A' if i % 2 == 0 else '1E1E3E'
+    estilo_fila(ws5, ro, 6, fg=alt)
+    ws5.cell(row=ro, column=1).alignment = Alignment(horizontal='left')
+    col_e = '2ECC71' if diff and diff > 0 else '0F9B8E' if not comp else 'E94560'
+    ws5.cell(row=ro, column=6).font = Font(color=col_e, size=10)
+    ws5.row_dimensions[ro].height = 20
+
+borde_tabla(ws5, 2, 11, 1, 6)
+borde_tabla(ws5, 15, 23, 1, 6)
+
+
+# ── Pestaña 6: Delivery ──────────────────────────────────────
+ws6 = wb.create_sheet('6. Delivery')
+ws6.sheet_view.showGridLines = False
+ws6.column_dimensions['A'].width = 30
+for col in ['B', 'C', 'D', 'E', 'F']:
+    ws6.column_dimensions[col].width = 20
+
+titulo_seccion(ws6, 1, '  VIABILIDAD ECONOMICA DEL DELIVERY', 6)
+
+params = [
+    ('Pedidos/semana en horario delivery', str(VIAJES_MES // 4)),
+    ('% que van a delivery (estimado)',    '80%'),
+    ('Viajes/mes estimados',               str(VIAJES_MES)),
+    ('Ticket promedio actual',             f"${ticket_prom:,.0f}"),
+    ('Margen operativo asumido',           '35%'),
+    ('Zona de cobertura',                  'Radio 2-3km'),
+    ('Medio de transporte',                'Moto propia del repartidor'),
+]
+estilo_header(ws6, 2, 2, fg='0F9B8E')
+ws6.cell(row=2, column=1, value='Parámetro')
+ws6.cell(row=2, column=2, value='Valor')
+for i, (k, v) in enumerate(params):
+    ro = 3 + i
+    ws6.cell(row=ro, column=1, value=k)
+    ws6.cell(row=ro, column=2, value=v)
+    alt = '2A2A4A' if i % 2 == 0 else '1E1E3E'
+    estilo_fila(ws6, ro, 2, fg=alt)
+    ws6.cell(row=ro, column=1).alignment = Alignment(horizontal='left')
+    ws6.row_dimensions[ro].height = 20
+
+titulo_seccion(ws6, 12, '  ESCENARIOS DE SUELDO', 6)
+estilo_header(ws6, 13, 6, fg='7F77DD')
+for j, h in enumerate(['Escenario', 'Sueldo bruto', 'Costo/viaje', 'Ticket min (35% margen)', 'vs Ticket actual', 'Estado'], 1):
+    ws6.cell(row=13, column=j, value=h)
+for i, (nombre, sueldo) in enumerate(escenarios_delivery):
+    ro            = 14 + i
+    costo_viaje   = round(sueldo / VIAJES_MES)
+    ticket_minimo = round(costo_viaje / MARGEN)
+    diff          = ticket_minimo - ticket_prom
+    estado = "Ya cubierto" if diff <= 0 else f"Necesita +${diff:,.0f}"
+    ws6.cell(row=ro, column=1, value=nombre)
+    ws6.cell(row=ro, column=2, value=sueldo)
+    ws6.cell(row=ro, column=3, value=costo_viaje)
+    ws6.cell(row=ro, column=4, value=ticket_minimo)
+    ws6.cell(row=ro, column=5, value=f"{diff:+,.0f}")
+    ws6.cell(row=ro, column=6, value=estado)
+    alt = '2A2A4A' if i % 2 == 0 else '1E1E3E'
+    estilo_fila(ws6, ro, 6, fg=alt)
+    ws6.cell(row=ro, column=1).alignment = Alignment(horizontal='left')
+    col_e = '2ECC71' if diff <= 0 else 'F5A623'
+    ws6.cell(row=ro, column=6).font = Font(color=col_e, size=10)
+    ws6.row_dimensions[ro].height = 20
+
+titulo_seccion(ws6, 20, '  TICKET MINIMO PARA ENVIO GRATIS', 6)
+minimos = [
+    ('Sueldo $350k, 236 viajes, 35% margen', round(350000 / 236 / 0.35)),
+    ('Sueldo $500k, 236 viajes, 35% margen', round(500000 / 236 / 0.35)),
+    ('Sueldo $500k, 236 viajes, 25% margen', round(500000 / 236 / 0.25)),
+    ('Sueldo $650k, 236 viajes, 35% margen', round(650000 / 236 / 0.35)),
+]
+estilo_header(ws6, 21, 3, fg='F5A623', texto='1A1A2E')
+ws6.cell(row=21, column=1, value='Escenario')
+ws6.cell(row=21, column=2, value='Ticket minimo ($)')
+ws6.cell(row=21, column=3, value='% pedidos actuales que lo superan')
+dist_tkt = [(15000, 34.9), (25000, 65.1), (40000, 86.0), (60000, 94.1), (999999, 100)]
+for i, (desc, minimo) in enumerate(minimos):
+    ro  = 22 + i
+    pct = next(p for lim, p in dist_tkt if minimo <= lim)
+    ws6.cell(row=ro, column=1, value=desc)
+    ws6.cell(row=ro, column=2, value=minimo)
+    ws6.cell(row=ro, column=3, value=f"{pct:.1f}%")
+    alt = '2A2A4A' if i % 2 == 0 else '1E1E3E'
+    estilo_fila(ws6, ro, 3, fg=alt)
+    ws6.cell(row=ro, column=1).alignment = Alignment(horizontal='left')
+    ws6.row_dimensions[ro].height = 20
+
+borde_tabla(ws6, 2, 9, 1, 2)
+borde_tabla(ws6, 13, 17, 1, 6)
+borde_tabla(ws6, 21, 25, 1, 3)
+
+wb.save(OUT_XLSX)
+print(f"   Guardado: {OUT_XLSX}")
+
+
+# ============================================================
+#  9. PRESENTACIÓN PPTX
+# ============================================================
+print("\n📑 Generando presentación PPTX...")
+
+prs = Presentation()
+prs.slide_width  = Inches(13.33)
+prs.slide_height = Inches(7.5)
+blank = prs.slide_layouts[6]
+
+
+def add_rect(slide, x, y, w, h, fill_hex):
+    shape = slide.shapes.add_shape(1, Inches(x), Inches(y), Inches(w), Inches(h))
+    shape.fill.solid()
+    shape.fill.fore_color.rgb = rgb(fill_hex)
+    shape.line.fill.background()
+    return shape
+
+
+def add_text(slide, text, x, y, w, h, size=14, bold=False,
+             color='FFFFFF', align=PP_ALIGN.LEFT, italic=False):
+    txb = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
+    tf  = txb.text_frame
+    tf.word_wrap = True
+    p   = tf.paragraphs[0]
+    p.alignment = align
+    run = p.add_run()
+    run.text            = text
+    run.font.size       = Pt(size)
+    run.font.bold       = bold
+    run.font.color.rgb  = rgb(color)
+    run.font.italic     = italic
+    return txb
+
+
+def slide_bg(slide, color='1A1A2E'):
+    add_rect(slide, 0, 0, 13.33, 7.5, color)
+
+
+def header_bar(slide, texto, sub=''):
+    add_rect(slide, 0, 0, 13.33, 0.85, 'E94560')
+    add_text(slide, texto, 0.3, 0.05, 10, 0.75, size=20, bold=True,
+             color='FFFFFF', align=PP_ALIGN.LEFT)
+    if sub:
+        add_text(slide, sub, 9, 0.15, 4, 0.55, size=9,
+                 color='FFCCCC', align=PP_ALIGN.RIGHT, italic=True)
+
+
+def kpi_card(slide, x, y, w, h, val, label, sub='', color='F5A623'):
+    add_rect(slide, x, y, w, h, '232342')
+    add_text(slide, val,   x+0.1, y+0.08, w-0.2, 0.5,
+             size=26, bold=True, color=color, align=PP_ALIGN.CENTER)
+    add_text(slide, label, x+0.05, y+0.58, w-0.1, 0.25,
+             size=10, bold=True, color='F0F0F0', align=PP_ALIGN.CENTER)
+    if sub:
+        add_text(slide, sub, x+0.05, y+0.82, w-0.1, 0.2,
+                 size=8, color='9A9AB0', align=PP_ALIGN.CENTER)
+
+
+def rule_row_pptx(slide, x, y, w, ant, con, conf_pct, lift, color='2ECC71'):
+    add_rect(slide, x, y, w, 0.38, '1E1E3E')
+    add_text(slide, ant, x+0.08, y+0.05, w*0.38, 0.28,
+             size=8.5, bold=True, color='F0F0F0')
+    add_text(slide, '→', x+w*0.38+0.05, y+0.05, 0.2, 0.28,
+             size=11, bold=True, color=color, align=PP_ALIGN.CENTER)
+    add_text(slide, con, x+w*0.38+0.25, y+0.05, w*0.34, 0.28,
+             size=8.5, bold=True, color=color)
+    add_rect(slide, x+w-0.7, y, 0.7, 0.38, '1A1A2E')
+    add_text(slide, f"{conf_pct}% / {lift}x",
+             x+w-0.68, y+0.08, 0.64, 0.22,
+             size=8, bold=True, color=color, align=PP_ALIGN.CENTER)
+
+
+# Slide 1: Portada
+sl = prs.slides.add_slide(blank)
+slide_bg(sl)
+add_rect(sl, 0, 0, 13.33, 1.1, 'E94560')
+add_rect(sl, 0, 6.4, 13.33, 1.1, '16213E')
+add_text(sl, 'PIZZA INMIGRANTE', 0.5, 0.2, 12, 0.7,
+         size=22, bold=True, color='FFFFFF', align=PP_ALIGN.CENTER)
+add_text(sl, 'Análisis Estratégico Integral', 0.5, 1.4, 12.3, 0.9,
+         size=38, bold=True, color='FFFFFF', align=PP_ALIGN.CENTER)
+add_text(sl, 'Ventas  ·  Comportamiento de Compra  ·  Posicionamiento vs Competencia',
+         0.5, 2.5, 12.3, 0.5, size=14, color='9A9AB0',
+         align=PP_ALIGN.CENTER, italic=True)
+add_text(sl, 'Agosto 2025 — Febrero 2026  |  2.233 pedidos  |  $56,2M facturados',
+         0.5, 6.5, 12.3, 0.45, size=12, color='F0F0F0', align=PP_ALIGN.CENTER)
+
+# Slide 2: KPIs
+sl = prs.slides.add_slide(blank)
+slide_bg(sl)
+header_bar(sl, 'Los números del negocio', 'Resumen Ejecutivo · Ago 2025 – Feb 2026')
+kpi_card(sl, 0.3,  1.0, 3.0, 1.15, f'${total_ventas/1e6:.1f}M', 'Facturación total',   '7 meses',          'F5A623')
+kpi_card(sl, 3.5,  1.0, 3.0, 1.15, f'${ticket_prom:,.0f}',       'Ticket promedio',     'por pedido',       '0F9B8E')
+kpi_card(sl, 6.7,  1.0, 3.0, 1.15, f'{total_pedidos:.0f}',       'Pedidos totales',     'Ago 25 – Feb 26',  'F0F0F0')
+kpi_card(sl, 9.9,  1.0, 3.1, 1.15, f'{total_pedidos/dias_op:.1f}','Pedidos/dia prom.',  'dias operativos',  'F5A623')
+kpi_card(sl, 0.3,  2.35, 3.0, 1.15, '18,5%',                     'Pizza Libre',         'del total facturado','E94560')
+kpi_card(sl, 3.5,  2.35, 3.0, 1.15, f'${descuentos/1e6:.1f}M',   'Descuentos',          f'{ped_desc/len(df_hist)*100:.1f}% de pedidos','E67E22')
+kpi_card(sl, 6.7,  2.35, 3.0, 1.15, f'{efectivo/total_cob*100:.1f}%','Pago en efectivo','mayor medio de pago','0F9B8E')
+kpi_card(sl, 9.9,  2.35, 3.1, 1.15, f'{sin_reg/total_cob*100:.1f}%','Sin medio registrado',f'${sin_reg/1e6:.1f}M sin dato','E94560')
+add_rect(sl, 0.3, 3.7, 12.7, 1.0, '232342')
+add_rect(sl, 0.3, 3.7, 0.07, 1.0, 'F5A623')
+add_text(sl, 'Insight clave:', 0.5, 3.78, 2, 0.3, size=11, bold=True, color='F5A623')
+add_text(sl,
+    'El negocio es solido en volumen pero tiene dos alertas criticas: el ticket cayó $7.000 '
+    'entre noviembre y febrero mientras la inflación subia, y $24,8M de facturación no tiene '
+    'medio de pago registrado en el sistema.',
+    0.5, 4.08, 12.3, 0.55, size=11, color='F0F0F0')
+alertas_kpi = [
+    ('$24,8M sin medio de pago', 'Auditar el sistema. 44% sin registro.', 'E94560'),
+    ('Ticket cayó nov→feb',      'De $29.360 a $21.145. Precios no acompanaron.', 'F5A623'),
+    ('Lunes y martes sin uso',   'Solo 4-7 pedidos/dia. Enorme potencial.', '0F9B8E'),
+]
+for i, (tit, desc, color) in enumerate(alertas_kpi):
+    x = 0.3 + i * 4.35
+    add_rect(sl, x, 4.85, 4.1, 0.9, '1E1E3E')
+    add_rect(sl, x, 4.85, 0.06, 0.9, color)
+    add_text(sl, tit,  x+0.15, 4.9,  3.85, 0.28, size=10, bold=True, color=color)
+    add_text(sl, desc, x+0.15, 5.18, 3.85, 0.52, size=9,  color='9A9AB0')
+
+# Slide 3: Ventas temporales
+sl = prs.slides.add_slide(blank)
+slide_bg(sl)
+header_bar(sl, 'Evolución mensual y patrones de demanda', 'Análisis de Ventas')
+max_v  = mes_ventas.max()
+bw_mes = 1.1
+bx0    = 0.35
+by0    = 5.8
+bh_max = 3.5
+for i, (m, v) in enumerate(mes_ventas.items()):
+    bx  = bx0 + i * bw_mes
+    bh  = (v / max_v) * bh_max
+    col = 'E94560' if '2026-01' in str(m) else 'F5A623' if '2025-08' in str(m) else '0F9B8E'
+    add_rect(sl, bx, by0 - bh, 0.85, bh, col)
+    add_text(sl, f'${v/1e6:.1f}M', bx, by0-bh-0.28, 0.85, 0.25,
+             size=8, bold=True, color='FFFFFF', align=PP_ALIGN.CENTER)
+    add_text(sl, str(m)[-5:], bx, by0+0.02, 0.85, 0.22,
+             size=7, color='9A9AB0', align=PP_ALIGN.CENTER)
+x_d   = 8.2
+y_d   = 1.1
+add_text(sl, 'Pedidos promedio por dia de semana', x_d, y_d, 4.8, 0.35,
+         size=11, bold=True, color='F0F0F0')
+dias_ord = dia_stats.sort_values('DiaSemana')
+max_pd   = dias_ord['pedidos_dia'].max()
+for i, (_, r) in enumerate(dias_ord.iterrows()):
+    y    = y_d + 0.5 + i * 0.48
+    bw_d = (r['pedidos_dia'] / max_pd) * 3.8
+    col  = 'F5A623' if r['nombre'] == 'Dom' else 'E94560' if r['nombre'] in ['Sáb', 'Vie'] else '0F9B8E'
+    add_rect(sl, x_d+0.75, y, bw_d, 0.35, col)
+    add_text(sl, r['nombre'], x_d, y, 0.72, 0.35, size=9, color='9A9AB0', align=PP_ALIGN.RIGHT)
+    add_text(sl, f"{r['pedidos_dia']:.1f}/dia", x_d+bw_d+0.8, y, 0.8, 0.35,
+             size=8, bold=True, color=col)
+add_text(sl, '93% de pedidos entre 21hs y 01hs  |  Dom/Sab/Vie = 67% del volumen',
+         0.3, 6.45, 12.5, 0.35, size=10, color='F5A623', bold=True)
+
+# Slide 4: Productos
+sl = prs.slides.add_slide(blank)
+slide_bg(sl)
+header_bar(sl, 'Ranking de productos por facturación', 'Análisis de Productos')
+top10  = prod_stats.head(10)
+max_t  = top10['Total'].max()
+bh2    = 0.42
+by2_0  = 1.05
+for i, (_, r) in enumerate(top10.iterrows()):
+    bw2 = (r['Total'] / max_t) * 8.5
+    col = 'F5A623' if i == 0 else 'E94560' if i < 5 else '0F9B8E'
+    add_rect(sl, 4.0, by2_0 + i*(bh2+0.08), bw2, bh2, col)
+    add_text(sl, r['Producto'], 0.3, by2_0 + i*(bh2+0.08), 3.6, bh2,
+             size=9, bold=(i == 0), color='F0F0F0', align=PP_ALIGN.RIGHT)
+    add_text(sl, f"${r['Total']/1e6:.2f}M  ({r['Cantidad']:.0f} uds)",
+             4.0+bw2+0.1, by2_0 + i*(bh2+0.08), 2.5, bh2, size=8, color='F0F0F0')
+add_rect(sl, 0.3, 6.0, 5.9, 0.7, '232342')
+add_rect(sl, 0.3, 6.0, 0.06, 0.7, 'F5A623')
+add_text(sl, f'Pizza Libre: ${prod_stats.iloc[0]["Total"]/1e6:.1f}M — 18,5% de toda la facturacion. Motor del negocio.',
+         0.48, 6.08, 5.7, 0.56, size=9.5, color='F0F0F0')
+add_rect(sl, 6.5, 6.0, 6.5, 0.7, '232342')
+add_rect(sl, 6.5, 6.0, 0.06, 0.7, 'E94560')
+add_text(sl, f'{len(baja_rot)} productos con menos de 20 ventas en 7 meses. Simplificar el menu reduce costo.',
+         6.68, 6.08, 6.2, 0.56, size=9.5, color='F0F0F0')
+
+# Slide 5: Qué son las reglas de asociación
+sl = prs.slides.add_slide(blank)
+slide_bg(sl)
+header_bar(sl, 'Que son las reglas de asociación?', 'Análisis Relacional — Metodología')
+conceptos_pptx = [
+    ('PRECEDENTE', 'Lo que el cliente elige primero. El SI de la regla.\nEj: el cliente pide Margherita', 'E94560'),
+    ('CONSECUENTE','Lo que aparece junto. El ENTONCES de la regla.\nEj: también pide Tomate e Rucula', '0F9B8E'),
+    ('CONFIANZA',  'Porcentaje de veces que se cumple la regla.\nEj: 53% = de cada 10 con Pepsi, 5+ piden Pizza Libre', 'F5A623'),
+    ('LIFT',       'Cuanto mas probable que el azar. Lift>1=real, Lift>3=muy fuerte.\nEj: Lift 9.33x = 9 veces mas probable que al azar', '7F77DD'),
+]
+for i, (titulo, desc, color) in enumerate(conceptos_pptx):
+    x = 0.3  + (i % 2) * 6.5
+    y = 1.1  + (i // 2) * 2.1
+    add_rect(sl, x, y, 6.2, 1.85, '232342')
+    add_rect(sl, x, y, 0.06, 1.85, color)
+    add_text(sl, titulo, x+0.2, y+0.1, 5.8, 0.32, size=13, bold=True, color=color)
+    add_text(sl, desc,   x+0.2, y+0.48, 5.8, 1.25, size=10, color='F0F0F0')
+add_rect(sl, 0.3, 5.45, 12.7, 0.8, '1E1E3E')
+add_rect(sl, 0.3, 5.45, 0.06, 0.8, 'E94560')
+add_text(sl,
+    'Analisis corrido sobre 1.357 pedidos con 2+ productos usando el algoritmo Apriori. '
+    'Las reglas permiten disenar combos basados en comportamiento real — no en intuicion.',
+    0.5, 5.55, 12.2, 0.62, size=11, color='F0F0F0')
+
+# Slide 6: Reglas globales
+sl = prs.slides.add_slide(blank)
+slide_bg(sl)
+header_bar(sl, 'Lo que tus clientes piden junto — top reglas', '1.357 pedidos · 30 reglas encontradas')
+if not reglas_global.empty:
+    for i, (_, r) in enumerate(reglas_global.head(8).iterrows()):
+        col = '2ECC71' if r['lift'] >= 4 else '0F9B8E' if r['lift'] >= 2.5 else 'F5A623'
+        rule_row_pptx(sl, 0.3, 1.0 + i*0.76, 12.7,
+                      r['antecedente'], r['consecuente'],
+                      f"{r['confidence']*100:.0f}", f"{r['lift']:.2f}", col)
+
+# Slide 7: Reglas por segmento
+sl = prs.slides.add_slide(blank)
+slide_bg(sl)
+header_bar(sl, 'Análisis relacional por segmento', 'Fin de semana · Entre semana · Ticket alto')
+segs_pptx = [
+    ('FIN DE SEMANA',     reglas_fds,    '0F9B8E', 0.3),
+    ('ENTRE SEMANA',      reglas_semana, 'F5A623', 4.55),
+    ('TICKET ALTO +$40k', reglas_alto,   '7F77DD', 8.8),
+]
+for titulo, reglas, color, x in segs_pptx:
+    add_rect(sl, x, 1.0, 2.0, 0.28, color)
+    add_text(sl, titulo, x, 1.0, 2.0, 0.28, size=8, bold=True,
+             color='FFFFFF', align=PP_ALIGN.CENTER)
+    if not reglas.empty:
+        for j, (_, r) in enumerate(reglas.head(5).iterrows()):
+            c = '2ECC71' if r['lift'] >= 4 else '0F9B8E' if r['lift'] >= 2.5 else 'F5A623'
+            rule_row_pptx(sl, x, 1.38 + j*0.97, 4.15,
+                          r['antecedente'][:22], r['consecuente'][:20],
+                          f"{r['confidence']*100:.0f}", f"{r['lift']:.2f}", c)
+hallazgos_pptx = [
+    ('Lift 9.33x', 'Trio italiano (Marg+Napoli+Rucula): la regla mas fuerte de todo el analisis', '2ECC71'),
+    ('Fugazzetta ancla', 'Aparece en 5 de 6 reglas de porciones. Es el centro del mostrador', '0F9B8E'),
+    ('Dos mundos separados', 'Pizza Libre y las italianas NUNCA se combinan. Son clientes distintos', 'F5A623'),
+]
+for i, (tit, desc, color) in enumerate(hallazgos_pptx):
+    x = 0.3 + i * 4.35
+    add_rect(sl, x, 6.55, 4.1, 0.72, '1E1E3E')
+    add_rect(sl, x, 6.55, 0.06, 0.72, color)
+    add_text(sl, tit,  x+0.15, 6.6,  3.85, 0.25, size=10, bold=True, color=color)
+    add_text(sl, desc, x+0.15, 6.85, 3.85, 0.38, size=8.5, color='9A9AB0')
+
+# Slide 8: Combos sugeridos
+sl = prs.slides.add_slide(blank)
+slide_bg(sl)
+header_bar(sl, 'Combos sugeridos — basados en datos reales', 'Oportunidades · Análisis Relacional')
+for i, c in enumerate(combos):
+    x     = 0.3  + (i % 3) * 4.35
+    y     = 1.1  + (i // 3) * 3.2
+    color = 'F5A623' if c['lift'] >= 5 else '0F9B8E' if c['lift'] >= 3 else 'E94560'
+    add_rect(sl, x, y, 4.1, 2.9, '232342')
+    add_rect(sl, x, y, 4.1, 0.32, color)
+    add_text(sl, c['nombre'], x+0.12, y+0.04, 3.85, 0.26,
+             size=11, bold=True, color='1A1A2E' if color == 'F5A623' else 'FFFFFF')
+    add_text(sl, c['items'], x+0.12, y+0.42, 3.85, 0.38,
+             size=11, bold=True, color='FFFFFF')
+    add_text(sl, f"Confianza: {c['conf']*100:.0f}%  /  Lift: {c['lift']}x",
+             x+0.12, y+0.85, 3.85, 0.28, size=10, color=color)
+    add_rect(sl, x+0.1, y+1.55, 3.9, 1.2, '1A1A2E')
+    add_text(sl, 'Ya ocurre naturalmente. Formalizarlo aumenta el ticket promedio.',
+             x+0.18, y+1.62, 3.72, 1.05, size=9, color=color, italic=True)
+
+# Slide 9: Precios
+sl = prs.slides.add_slide(blank)
+slide_bg(sl)
+header_bar(sl, 'Estrategia de precios — Undercut vs Pizza40', 'Estrategia de Precios')
+add_text(sl, 'ITALIANA CHICA — +15%', 0.3, 1.0, 6.0, 0.3,
+         size=12, bold=True, color='0F9B8E')
+col_names = ['Producto', 'Actual', '+15%', 'Pizza40', 'Estado']
+col_widths = [2.0, 1.2, 1.2, 1.2, 2.0]
+x_cols = [0.3]
+for cw in col_widths[:-1]:
+    x_cols.append(x_cols[-1] + cw)
+for j, (h, xc, wc) in enumerate(zip(col_names, x_cols, col_widths)):
+    add_rect(sl, xc, 1.32, wc, 0.3, '0F9B8E')
+    add_text(sl, h, xc+0.05, 1.32, wc-0.05, 0.3, size=9, bold=True,
+             color='FFFFFF', align=PP_ALIGN.CENTER)
+for i, (nombre, actual, comp) in enumerate(italiana_chica):
+    ro_y  = 1.65 + i * 0.38
+    nuevo = round(actual * 1.15)
+    diff  = comp - nuevo if comp else None
+    col_bg = '2A2A4A' if i % 2 == 0 else '1E1E3E'
+    add_rect(sl, 0.3, ro_y, 7.6, 0.36, col_bg)
+    datos = [nombre, f'${actual:,}', f'${nuevo:,}', f'${comp:,}' if comp else '—']
+    for j, (d, xc, wc) in enumerate(zip(datos, x_cols, col_widths)):
+        add_text(sl, d, xc+0.05, ro_y+0.04, wc-0.05, 0.28,
+                 size=8.5, color='F0F0F0',
+                 align=PP_ALIGN.LEFT if j == 0 else PP_ALIGN.CENTER)
+    estado   = f"{diff/comp*100:.0f}% menos" if diff and diff > 0 else "mas caro" if diff else "—"
+    color_e  = '2ECC71' if diff and diff > 0 else 'E94560'
+    add_text(sl, estado, x_cols[4]+0.05, ro_y+0.04, col_widths[4]-0.05, 0.28,
+             size=8.5, bold=True, color=color_e, align=PP_ALIGN.CENTER)
+add_text(sl,
+    'Portena: Fugazzetta, Jamon y Morrones y Queso Azul no tienen competidor directo. '
+    'Mozzarella, Jamon y Napolitana: maximo +5%.',
+    0.3, 5.9, 12.7, 0.55, size=10, color='9A9AB0', italic=True)
+
+# Slide 10: Delivery
+sl = prs.slides.add_slide(blank)
+slide_bg(sl)
+header_bar(sl, 'Viabilidad económica del delivery', 'Moto propia · Radio 2-3km · Sueldo fijo')
+for i, (nombre, sueldo) in enumerate(escenarios_delivery):
+    x         = 0.3  + (i % 2) * 6.55
+    y         = 1.1  + (i // 2) * 2.6
+    costo_v   = round(sueldo / VIAJES_MES)
+    tick_min  = round(costo_v / MARGEN)
+    diff      = tick_min - ticket_prom
+    col       = '2ECC71' if diff <= 0 else 'F5A623' if diff <= 8000 else 'E94560'
+    add_rect(sl, x, y, 6.2, 2.3, '232342')
+    add_rect(sl, x, y, 6.2, 0.32, '1E1E3E')
+    add_text(sl, nombre, x+0.15, y+0.04, 5.8, 0.26, size=12, bold=True, color=col)
+    filas_del = [
+        ('Sueldo mensual',                  f'${sueldo:,}'),
+        ('Costo por viaje',                 f'${costo_v:,}'),
+        ('Ticket minimo para envio gratis', f'${tick_min:,}'),
+        ('vs ticket actual ($25.183)',       'Ya cubierto' if diff <= 0 else f'+${diff:,.0f} necesario'),
+    ]
+    for j, (k, v) in enumerate(filas_del):
+        fy = y + 0.42 + j * 0.42
+        add_text(sl, k, x+0.15, fy, 3.8, 0.38, size=9, color='9A9AB0')
+        add_text(sl, v, x+4.0, fy, 2.05, 0.38, size=10, bold=True,
+                 color=col if j == 3 else 'F0F0F0', align=PP_ALIGN.RIGHT)
+add_rect(sl, 0.3, 6.4, 12.7, 0.78, '232342')
+add_rect(sl, 0.3, 6.4, 0.06, 0.78, 'E94560')
+add_text(sl,
+    'Si lo registras en blanco suma 27-30% de cargas sociales sobre el sueldo bruto '
+    '(ART, aguinaldo, vacaciones). Consulta con tu contador para el encuadre correcto.',
+    0.5, 6.5, 12.2, 0.6, size=10, color='F0F0F0')
+
+# Slide 11: Cierre
+sl = prs.slides.add_slide(blank)
+slide_bg(sl)
+add_rect(sl, 0, 0, 13.33, 1.0, 'E94560')
+add_rect(sl, 0, 6.5, 13.33, 1.0, '16213E')
+add_text(sl, 'RESUMEN EJECUTIVO', 0.5, 0.1, 12.3, 0.8,
+         size=22, bold=True, color='FFFFFF', align=PP_ALIGN.CENTER)
+add_text(sl, 'Las 5 cosas mas importantes', 0.5, 1.2, 12.3, 0.5,
+         size=20, bold=True, color='FFFFFF', align=PP_ALIGN.CENTER)
+puntos_finales = [
+    ('1', 'Pizza Libre es el corazon del negocio ($10,4M). Todo el marketing debe girar en torno a ella.', 'F5A623'),
+    ('2', 'Subir precios en italiana chica un 15% es seguro — quedas por debajo de Pizza40 en casi todos los sabores.', '0F9B8E'),
+    ('3', 'Auditar los $24,8M sin medio de pago es urgente. Es el primer paso para tener control real.', 'E94560'),
+    ('4', 'Lunes y martes son dias casi sin actividad — una promo dirigida puede incrementar volumen sin riesgo.', '0F9B8E'),
+    ('5', 'Los combos sugeridos ya existen en la practica. Formalizarlos convierte comportamiento espontaneo en ingreso garantizado.', 'F5A623'),
+]
+for i, (num, texto, color) in enumerate(puntos_finales):
+    y = 1.9 + i * 0.95
+    add_rect(sl, 0.5, y, 0.5, 0.5, color)
+    add_text(sl, num, 0.5, y, 0.5, 0.5, size=16, bold=True,
+             color='1A1A2E', align=PP_ALIGN.CENTER)
+    add_text(sl, texto, 1.15, y+0.08, 11.8, 0.42, size=11, color='F0F0F0')
+add_text(sl,
+    'Analisis generado con datos reales del sistema de gestion · Pizza Inmigrante · 2026',
+    0.5, 6.62, 12.3, 0.3, size=9, color='9A9AB0',
+    align=PP_ALIGN.CENTER, italic=True)
+
+prs.save(OUT_PPTX)
+print(f"   Guardado: {OUT_PPTX}")
+
+
+# ============================================================
+#  10. RESUMEN FINAL
+# ============================================================
+print("\n" + "="*60)
+print("  RESUMEN FINAL")
+print("="*60)
+print(f"""
+  Facturación      : ${total_ventas:,.0f}
+  Pedidos          : {total_pedidos:.0f}
+  Ticket promedio  : ${ticket_prom:,.0f}
+  Sin medio de pago: ${sin_reg:,.0f} ({sin_reg/total_cob*100:.1f}%)
+
+  Reglas encontradas:
+     Global       : {len(reglas_global)}
+     Fin semana   : {len(reglas_fds)}
+     Entre semana : {len(reglas_semana)}
+     Ticket alto  : {len(reglas_alto)}
+     Triplets     : {len(triplets)}
+
+  Archivos generados:
+     {OUT_PNG}
+     {OUT_PPTX}
+     {OUT_XLSX}
+""")
+print("="*60)
+print("  Analisis completado correctamente")
+print("="*60)
